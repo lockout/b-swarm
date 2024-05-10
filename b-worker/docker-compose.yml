@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+    harvester:
+        container_name: harvester
+        hostname: harvester
+        restart: on-failure
+        build: .
+        image: asia-docker.pkg.dev/jsps-deploy/bb-docker-ar-1/harvester:latest
+        env_file:
+          - secrets/secrets.env
+        command: /harvester/harvester.py
+        #command: tail -f /dev/null | /dev/null # for debugging purposes
+        shm_size: "2gb"
+        networks:
+          - bnet
+
+networks:
+    bnet:
+        driver: bridge
