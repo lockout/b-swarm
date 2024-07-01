@@ -8,21 +8,20 @@
 # __version__ = "code_version/report_syntax_version"
 __license__ = "gplv3"
 __author__ = "bb"
-__version__ = "0.34/0.52"
+__version__ = "0.4/0.6"
 
 # TODO:
-# 1. Add session handover between Selenium and Requests. Or acquire the
-# HTTP headers via Socket;
-# 2. Detect malicious file download url - no snapshot for those. Check if
+# 1. Detect malicious file download url - no snapshot for those. Check if
 # file exists and may be downloaded, but no actual downloads. Later, download 
 # and calculate file hashes;
-# 3. if the target url is the file, its hash should be calculated and provided
+# 2. if the target url is the file, its hash should be calculated and provided
 # for future analysis (e.g., VirusTotal API etc.).
 
 import base64
 import logging
 import subprocess
 import ssl
+import socket
 from time import time, sleep
 from json import loads
 from io import BytesIO
@@ -67,8 +66,8 @@ def get_sha256(data_source):
         data_source = data_source.encode('utf-8')
     except:
         pass
-    contentSha256 = sha256(data_source).hexdigest()
-    return contentSha256
+    contentHash = sha256(data_source).hexdigest()
+    return contentHash
 
 def get_ppdeep(data_source):
     """
@@ -91,16 +90,22 @@ def get_entropy(data_source):
         )
     return ent
 
-def get_random_useragent():
+def set_useragent(userAgent=""):
     """
     Sets the user-agent variable based on the profile specification.
     If no user-agent is specified, set it to a random valid user-agent
+    TODO: Implement JSON styled useragent list with desktop and mobile
+    platform specific useragents. Or separate files for each platform.
+    Platform specification: widnows, linux, macos, android, ios
     """
-    with open("user-agents.txt", 'r') as file:
-        useragents = file.readlines()
-    userAgent = useragents[
-        randint(0, len(useragents) - 1)
-    ]
+    if userAgent:
+        userAgent = userAgent
+    else:
+        with open("user-agents.txt", 'r') as file:
+            useragents = file.readlines()
+        userAgent = useragents[
+            randint(0, len(useragents) - 1)
+        ]
     log.debug(f"User agent: {userAgent}")
     return userAgent
 
@@ -115,6 +120,29 @@ def check_url(url):
     log.debug(f"Checking URL {origUrl} -> {url}") 
     return url
 
+def get_http_banner(url, timeout=3):
+    parseUrl = urlparse(url)
+    host = parseUrl.hostname
+    if parseUrl.port:
+        port = parseUrl.port
+    elif parseUrl.scheme == "https":
+        port = 443
+    else:
+        port = 80
+    log.info(f"Grabbing banner for {host}:{port}")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        request = (f"GET {parseUrl.path if parseUrl.path else '/'} "
+                f"HTTP/1.1\r\nHost: {host}\r\n\r\n")
+        sock.send(request.encode('utf-8'))
+        banner = sock.recv(1024)
+        sock.close()
+        return banner.decode('utf-8', errors='ignore')
+    except Exception as err:
+        return ""
+
 def get_content_type(url):
     """
     Try to identify what is the content type of the target url.
@@ -123,7 +151,7 @@ def get_content_type(url):
     """
     try:
         log.info("Detecting URL content-type")
-        requests.head(url).headers["Content-Type"]
+        return requests.head(url).headers["Content-Type"]
     except Exception as err:
         return False
 
@@ -335,18 +363,55 @@ def load_profile(jsonFile):
     Open and load the JSON profile file.
     The future approach is to deliver the configruation profile via
     the messaging queue (e.g., Nats), instead of files.
+    
+    Fields in the JSON cofiguration file.
+    profile:
+        syntax: string                      # Profile syntax version
+        id: string                          # Profile identifier
+        description: string                 # Profile description
+        timestamp: timestamp                # Profile creation timestamp
+    manager:
+        task_id: string                     # Task identifier
+        task_count: integer                 # Number of tasks to execute
+        task_sleep: integer                 # Timer to sleep between tasks
+    connector:
+        ip_region: string                   # IP region name
+        proxy: string                       # Proxy connection string
+        tor: bool                           # Use Tor Ture/False
+        vpn: list                           # List of VPN connection parameters
+    harvester:
+        harvest_url: list                   # List of URLs to access
+        harvest_allowredirect: bool         # Permit HTTP redirects
+        harvest_requesttimeout: integer     # Timeout for a single HTTP request
+        harvest_useragent: string           # Useragent string
+        harvest_privatemode: bool           # Use browser in Private mode
+        harvest_timer: bool                 # Measure harvest time
+        harvest_timeout: integer            # Set overall harvest timeout
+        harvest_ssl: bool                   # Collect server SSL fingerprint
+        harvest_banner: bool                # Collect server HTTP banner
+        harvest_headers: bool               # Collect HTTP headers
+        content_html: bool                  # Collect HTML content
+        content_html_sha256: bool           # Calculate HTML content SHA256
+        content_html_fuzzyhash: bool        # Calculate HTML content fuzzyhash
+        content_html_entropy: bool          # Calculate HTML Shannon entropy
+        content_image: bool                 # Collect PNG screenshot
+        content_image_size: list            # Windown and screenshot size (WxH)
+        content_image_grayscale: bool       # Convert screenshot to grayscale
+        content_image_entropy: bool         # Calculate PNG Shannon entropy
+    reporter:
+        pass
     """
     log.info("Loading JSON profile")
     with open(jsonFile) as f:
         jsonData = f.read()
     jsonProfile = loads(jsonData)
-    metaProfile = jsonProfile["profile_meta"]
+    metaProfile = jsonProfile["profile"]
     managerProfile = jsonProfile["manager"]
     connectorProfile = jsonProfile["connector"]
     harvesterProfile = jsonProfile["harvester"]
     reporterProfile = jsonProfile["reporter"] # To be used for Message queues
     global profileId
-    profileId = metaProfile["profile_id"]
+    profileId = metaProfile["id"]
     global profileTimestamp
     profileTimestamp = metaProfile["timestamp"]
     global taskId
@@ -368,35 +433,38 @@ def load_profile(jsonFile):
             check_url(url)
         )
     global harvestUseragent
-    harvestUseragent = harvesterProfile["harvest_useragent"]
-    if not harvestUseragent:
-        harvestUseragent = get_random_useragent()
+    harvestUseragentVal = harvesterProfile["harvest_useragent"]
+    harvestUseragent = set_useragent(harvestUseragentVal)
     global harvestPrivatemode
     harvestPrivatemode = harvesterProfile["harvest_privatemode"]
-    global harvestHeaders
-    harvestHeaders = harvesterProfile["harvest_headers"]
     global harvestTime
     harvestTime = harvesterProfile["harvest_timer"]
     global requestTimeout
     requestTimeout = harvesterProfile["harvest_requesttimeout"]
     global harvestTimeout # overall harvest timeout not implemented
     harvestTimeout = harvesterProfile["harvest_timeout"]
-    global contentSsl
-    contentSsl = harvesterProfile["content_ssl"]
+    global harvestSsl
+    harvestSsl = harvesterProfile["harvest_ssl"]
+    global harvestBanner
+    harvestBanner = harvesterProfile["harvest_banner"]
+    global harvestHeaders
+    harvestHeaders = harvesterProfile["harvest_headers"]
     global contentHtml
     contentHtml = harvesterProfile["content_html"]
+    global contentSha256
+    contentSha256 = harvesterProfile["content_html_sha256"]
+    global contentFuzzyhash
+    contentFuzzyhash = harvesterProfile["content_html_fuzzyhash"]
+    global contentEntropy
+    contentEntropy = harvesterProfile["content_html_entropy"]
     global contentImage
     contentImage = harvesterProfile["content_image"]
     global contentImageSize
-    contentImageSize = harvesterProfile["content_imagesize"]
+    contentImageSize = harvesterProfile["content_image_size"]
     global contentImageGrayscale
     contentImageGrayscale = harvesterProfile["content_image_grayscale"]
-    global contentSha256
-    contentSha256 = harvesterProfile["content_sha256"]
-    global contentSsdeep
-    contentSsdeep = harvesterProfile["content_ssdeep"]
-    global contentEntropy
-    contentEntropy = harvesterProfile["content_entropy"]
+    global contentImageEntropy
+    contentImageEntropy = harvesterProfile["content_image_entropy"]
     log.info("Loading JSON profile done")
 
 def create_connection():
@@ -499,7 +567,11 @@ def snapshot(url, virtualDisplay=True):
             "",
             ""
         )
-    if contentSsl:
+    if harvestBanner:
+        banner = get_http_banner(url)
+    else:
+        banner = ""
+    if harvestSsl:
         sslFingerprint = get_ssl_fingerprint(url)
     else:
         sslFingerprint = ""
@@ -529,15 +601,19 @@ def snapshot(url, virtualDisplay=True):
         hashSha256 = get_sha256(content)
     else:
         hashSha256 = ""
-    if content and contentSsdeep:
+    if content and contentFuzzyhash:
         hashPpdeep = get_ppdeep(content)
     else:
         hashPpdeep = ""
     if content and contentEntropy:
         entropy = get_entropy(content)
     else:
-        entropy = 0
-    if contentImageGrayscale and image:
+        entropy = -1
+    if image and contentImageEntropy:
+        imageEntropy = get_entropy(image)
+    else:
+        imageEntropy = -1
+    if image and contentImageGrayscale:
         image = convert_image_grayscale(image)
     interactReport = {
         "meta_version": __version__.split('/')[1],
@@ -546,20 +622,26 @@ def snapshot(url, virtualDisplay=True):
         "meta_timestamp": datetime.fromtimestamp(time()),
         "meta_starttime": datetime.fromtimestamp(startTime),
         "meta_endtime": datetime.fromtimestamp(endTime),
-        "meta_interacttime": timedelta(seconds=(endTime - startTime)), # Consider storing as float64
-        "url_init": url,
-        "url_end": curl,
-        "http_useragent": harvestUseragent,
+        "meta_interacttime": timedelta(seconds=(endTime - startTime)), # Consider storing as float64?
         "http_ssl": sslFingerprint,
-        "http_headers": headers,
+        "http_banner": banner,
+        "http_headers": headers, # Collect HTTP headers from requests
+        "http_useragent": harvestUseragent,
         "http_cookies": str(cookies),
-        "http_content": content,
-        "http_sha256": hashSha256,
-        "http_fuzzyhash": hashPpdeep,
-        "http_entropy": entropy,
-        "http_image": image
+        "http_url": url,
+        "http_url_end": curl,
+        "http_document": content,
+        "http_document_type": "", # Get doctype from headers
+        "http_document_bytesize": len(content.encode('utf-8')),
+        "http_document_sha256": hashSha256,
+        "http_document_fuzzyhash": hashPpdeep,
+        "http_document_entropy": entropy,
+        "http_document_content": "",
+        "http_image": image,
+        "http_image_entropy": imageEntropy,
     }
     sessionReport.append(interactReport)
+
 
 def google_bucket_auth(bucketName=None, serviceKey=None):
     """
@@ -615,18 +697,22 @@ pandasSchema = {
     "meta_timestamp": "datetime64[ms]",
     "meta_starttime": "datetime64[ms]",
     "meta_endtime": "datetime64[ms]",
-    "meta_interacttime": "timedelta64[ms]", # consider float64
-    "url_init": "string",
-    "url_end": "string",
-    "http_useragent": "string",
+    "meta_interacttime": "timedelta64[ms]", # consider float64?
     "http_ssl": "string",
     "http_headers": "string",
+    "http_useragent": "string",
     "http_cookies": "string",
-    "http_content": "string",
-    "http_sha256": "string",
-    "http_fuzzyhash": "string",
-    "http_entropy": "float64",
-    "http_image": "object"
+    "http_url": "string",
+    "http_url_end": "string",
+    "http_document": "string",
+    "http_document_type": "string",
+    "http_document_bytesize": "int64",
+    "http_document_sha256": "string",
+    "http_document_fuzzyhash": "string",
+    "http_document_entropy": "float64",
+    "http_document_content": "string",
+    "http_image": "object",
+    "http_image_entropy": "float64",
 }
 
 if __name__ == "__main__":
