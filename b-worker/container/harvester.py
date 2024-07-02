@@ -131,14 +131,21 @@ def get_http_banner(url, timeout=3):
         port = 80
     log.info(f"Grabbing banner for {host}:{port}")
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
+        if port == 80:
+            conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            conn.settimeout(timeout)
+            conn.connect((host, port))
+        if port == 443:
+            context = ssl.create_default_context()
+            conn = context.wrap_socket(socket.socket(socket.AF_INET),
+                                        server_hostname=host)
+            conn.settimeout(timeout)
+            conn.connect((host, port))
         request = (f"GET {parseUrl.path if parseUrl.path else '/'} "
                 f"HTTP/1.1\r\nHost: {host}\r\n\r\n")
-        sock.send(request.encode('utf-8'))
-        banner = sock.recv(1024)
-        sock.close()
+        conn.send(request.encode('utf-8'))
+        banner = conn.recv(1024)
+        conn.close()
         return banner.decode('utf-8', errors='ignore')
     except Exception as err:
         return ""
